@@ -1,0 +1,4 @@
+# wasm-only: getrandom's wasm_js backend (libcrux/openmls RNG on wasm). Scoped to the wasm
+# target so native `cargo test` is unaffected.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

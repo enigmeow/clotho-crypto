@@ -1,0 +1,27 @@
+[package]
+name = "clotho-mls"
+version = "0.1.0"
+edition = "2021"
+description = "Post-quantum end-to-end encryption for the Endiavo/Clotho messenger: an OpenMLS (RFC 9420) wrapper compiled to WebAssembly, running a fully post-quantum ciphersuite (ML-KEM-1024 + ML-DSA-87) via the RustCrypto provider, with per-device certificate credentials (identity-signed, Ed25519)."
+license = "MIT"
+readme = "README.md"
+keywords = ["mls", "e2ee", "post-quantum", "openmls", "wasm"]
+categories = ["cryptography", "wasm"]
+# repository = "https://github.com/…"  # TODO: set to the public URL once the crypto layer is published (export.md §2 Path A)
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+openmls = { git = "https://github.com/openmls/openmls", rev = "9f41ddc252cf1720a0a5e24b91d77dce988de80b", features = ["js", "draft-ietf-mls-pq-ciphersuites"] }
+openmls_traits = { git = "https://github.com/openmls/openmls", rev = "9f41ddc252cf1720a0a5e24b91d77dce988de80b" }
+openmls_basic_credential = { git = "https://github.com/openmls/openmls", rev = "9f41ddc252cf1720a0a5e24b91d77dce988de80b", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "9f41ddc252cf1720a0a5e24b91d77dce988de80b", features = ["draft-ietf-mls-pq-ciphersuites"] }
+ml-dsa = "0.1.0"
+sha2 = "0.10"
+# force the wasm randomness backend across all getrandom majors the RustCrypto stack pulls
+gr2 = { package = "getrandom", version = "0.2", features = ["js"] }
+gr3 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+gr4 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
