@@ -1,3 +1,7 @@
+// ⚠️ PUBLISHED CRYPTO SOURCE — kept byte-for-byte in sync with the public `clotho-crypto` repo
+// (EAR §742.15(b) publicly-available-source decontrol). Any edit here MUST be mirrored to that repo in
+// the SAME change; if it alters crypto behavior, re-send the BIS/NSA notification. See CLAUDE.md →
+// "Published crypto mirror".
 use std::collections::HashMap;
 
 use openmls::prelude::tls_codec::*;

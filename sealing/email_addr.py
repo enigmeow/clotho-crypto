@@ -1,3 +1,7 @@
+# ⚠️ PUBLISHED CRYPTO SOURCE — kept byte-for-byte in sync with the public `clotho-crypto` repo
+# (EAR §742.15(b) publicly-available-source decontrol). Any edit here MUST be mirrored to that repo in
+# the SAME change; if it alters crypto behavior, re-send the BIS/NSA notification. See CLAUDE.md →
+# "Published crypto mirror".
 """Email handling for the registration gate (Project 1). Mirrors app.phone: the address is NEVER
 persisted raw — only an HMAC blind index (one-account-per-email dedup) + a sealed box (offline
 Caly+Josh key). Reuses CLOTHO_PHONE_INDEX_KEY (domain-separated with a b"email:" prefix) and the
