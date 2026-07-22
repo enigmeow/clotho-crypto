@@ -379,6 +379,24 @@ impl MlsClient {
                 Ok(ProcessResult { kind: "application".into(), plaintext: Some(app.into_bytes()), sender, sender_pubkey })
             }
             ProcessedMessageContent::StagedCommitMessage(staged) => {
+                // F1 (security-audit 2026-07-22): validate EVERY member this commit ADDS, exactly as
+                // `validate_joiner_kp` / `process_welcome_native` do on the membership changes WE
+                // originate. OpenMLS treats the leaf `BasicCredential` as opaque bytes (it only checks
+                // the leaf's own signature), so a malicious-but-legitimate member could Add a leaf
+                // whose credential is NOT a valid Clotho device cert. Such a leaf is invisible to
+                // `group_members` (filtered out at :465) and unreachable by `remove_member` /
+                // `remove_device_leaf` (both match on a verifiable cert) — a hidden, unlistable,
+                // unremovable reader that keeps receiving epoch secrets and survives the adder's own
+                // eviction. Refuse to merge such a commit (drop it, don't panic — same fail-closed,
+                // borrow-safe shape as the rest of this fn); an honest member's commit always passes.
+                for add in staged.add_proposals() {
+                    let leaf = add.add_proposal().key_package().leaf_node();
+                    let cert = verify_device_cert(leaf.credential().serialized_content())
+                        .ok_or_else(|| "commit: added leaf has invalid device cert".to_string())?;
+                    if cert.device_pubkey.as_slice() != leaf.signature_key().as_slice() {
+                        return Err("commit: added leaf cert device_pubkey != leaf signature key".into());
+                    }
+                }
                 group.merge_staged_commit(&self.provider, *staged)
                     .map_err(|e| format!("merge staged commit: {e}"))?;
                 Ok(ProcessResult { kind: "commit".into(), plaintext: None, sender, sender_pubkey })
@@ -953,6 +971,53 @@ mod tests {
         // And the client is STILL usable afterwards (not poisoned): a real add succeeds.
         let mut b = client_for([2u8; 32], [21u8; 32], "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
         assert!(a.add_member_native(&gid, &b.key_packages_native(1).remove(0)).is_ok());
+    }
+
+    #[test]
+    fn incoming_commit_rejects_added_leaf_with_bogus_cert() {
+        // F1 (security-audit 2026-07-22): a malicious-but-legitimate member (Mallory) uses a PATCHED
+        // client to Add a leaf X whose credential is NOT a valid Clotho device cert, bypassing her own
+        // `validate_joiner_kp`. An HONEST recipient (Alice) processing that commit must REFUSE it —
+        // otherwise X becomes a hidden reader (dropped by `group_members`) that can't be removed by
+        // uuid or device id and survives Mallory's own eviction.
+        let mut mallory = client_for([1u8; 32], [11u8; 32], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        let mut alice = client_for([2u8; 32], [12u8; 32], "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        let gid = mallory.create_group_native();
+        let (_c, w) = mallory.add_member_native(&gid, &alice.key_packages_native(1).remove(0)).unwrap();
+        let ag = alice.process_welcome_native(&w).unwrap();
+
+        // Attacker leaf X with a raw (non-cert) BasicCredential — same construction as
+        // `add_rejects_non_cert_credential`.
+        let x_seed = [33u8; 32];
+        let x_pub = mldsa87_public_from_seed_native(&x_seed);
+        let x_signer = SignatureKeyPair::from_raw(SignatureScheme::MLDSA87, x_seed.to_vec(), x_pub.clone());
+        let x_provider = OpenMlsRustCrypto::default();
+        x_signer.store(x_provider.storage()).unwrap();
+        let x_cred = CredentialWithKey {
+            credential: BasicCredential::new(b"not-a-cert".to_vec()).into(),
+            signature_key: x_signer.public().into(),
+        };
+        let x = MlsClient { provider: x_provider, signer: x_signer, credential: x_cred, groups: HashMap::new() };
+        let x_kp_bytes = x.key_packages_native(1).remove(0);
+
+        // Mallory, PATCHED, Adds X directly via OpenMLS (skipping `validate_joiner_kp`) and advances
+        // her own epoch — exactly what the crate's own API refuses to build.
+        let x_kp = KeyPackageIn::tls_deserialize_exact(x_kp_bytes.as_slice()).unwrap()
+            .validate(mallory.provider.crypto(), ProtocolVersion::Mls10).unwrap();
+        let mgroup = mallory.groups.get_mut(&gid).unwrap();
+        let (commit, _welcome, _gi) = mgroup.add_members(&mallory.provider, &mallory.signer, &[x_kp]).unwrap();
+        mgroup.merge_pending_commit(&mallory.provider).unwrap();
+        let commit_bytes = commit.tls_serialize_detached().unwrap();
+
+        // Alice REFUSES the malicious commit (fail-closed) rather than admitting the hidden reader.
+        assert!(alice.process_native(&ag, &commit_bytes).is_err(),
+            "an incoming commit that adds a non-cert leaf must be rejected");
+        // X was NOT admitted to Alice's view — still just Mallory + Alice.
+        assert_eq!(alice.group_members_native(&ag).unwrap().len(), 2);
+        // Alice is not poisoned by the rejection: she can still create a group and add a valid member.
+        let mut carol = client_for([3u8; 32], [13u8; 32], "cccccccc-cccc-cccc-cccc-cccccccccccc");
+        let g2 = alice.create_group_native();
+        assert!(alice.add_member_native(&g2, &carol.key_packages_native(1).remove(0)).is_ok());
     }
 
     #[test]
