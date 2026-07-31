@@ -217,8 +217,23 @@ impl MlsClient {
             .validate(self.provider.crypto(), ProtocolVersion::Mls10)
             .map_err(|e| format!("validate key package: {e:?}"))?;
         let leaf = kp.leaf_node();
-        let cert = verify_device_cert(leaf.credential().serialized_content())
-            .ok_or_else(|| "joiner: invalid device cert".to_string())?;
+        let raw_cert = leaf.credential().serialized_content();
+        // Name the version byte: a device that has not come online since the identity-key migration
+        // still offers a **v2** (Ed25519-identity) cert, which is rejected here by design. That is a
+        // permanent condition — a reusable last-resort KeyPackage carries it forever — so saying so
+        // out loud is the difference between a one-line diagnosis and an afternoon (prod 2026-07-31).
+        let cert = verify_device_cert(raw_cert).ok_or_else(|| {
+            format!(
+                "joiner: invalid device cert (version byte {}, {} bytes){}",
+                raw_cert.first().copied().unwrap_or(0),
+                raw_cert.len(),
+                if raw_cert.first() == Some(&2) {
+                    " — a pre-ML-DSA v2 cert; this device must re-mint a v3 cert and republish"
+                } else {
+                    ""
+                },
+            )
+        })?;
         if cert.device_pubkey.as_slice() != leaf.signature_key().as_slice() {
             return Err("joiner: cert device_pubkey != leaf signature_key".into());
         }
@@ -268,14 +283,22 @@ impl MlsClient {
         // enforce `expected_identity` per KP, so a foreign leaf the untrusted server tries to substitute
         // is dropped, not added. Err only when NOTHING valid remains (caller has nothing to stage).
         let mut kps = Vec::with_capacity(kp_blobs.len());
-        for kp_bytes in &kp_blobs {
+        // Keep WHY each one was dropped. Skipping is right — one bad package must not block a peer's
+        // other devices — but discarding the reason left "no valid key packages" as the only signal,
+        // which says nothing actionable when a whole batch fails. Callers log this verbatim.
+        let mut rejected: Vec<String> = Vec::with_capacity(kp_blobs.len());
+        for (i, kp_bytes) in kp_blobs.iter().enumerate() {
             match self.validate_joiner_kp(kp_bytes, Some(expected_identity)) {
                 Ok(kp) => kps.push(kp),
-                Err(_) => continue,
+                Err(e) => rejected.push(format!("#{i} ({} B): {e}", kp_bytes.len())),
             }
         }
         if kps.is_empty() {
-            return Err("stage add members: no valid key packages".into());
+            return Err(format!(
+                "stage add members: no valid key packages ({} rejected — {})",
+                rejected.len(),
+                rejected.join("; ")
+            ));
         }
         let group = self.groups.get_mut(gid).ok_or_else(|| "unknown group".to_string())?;
         let (commit, welcome, _gi) = group
@@ -1110,6 +1133,36 @@ mod tests {
         let mut adder = client_for([8u8; 32], [18u8; 32], "22222222-2222-2222-2222-222222222222");
         let gid = adder.create_group_native();
         adder.add_member_native(&gid, &lr).expect("add_member with a last-resort key package");
+    }
+
+    #[test]
+    fn stage_add_members_reports_why_each_key_package_was_rejected() {
+        // Prod 2026-07-31: a peer's whole batch was rejected and the only signal was
+        // "no valid key packages". Diagnosing it needed a probe against real prod blobs, when the
+        // crate already knew the answer and threw it away (`Err(_) => continue`). The reason must
+        // ride the error — a rejection you cannot attribute costs hours the next time.
+        let mut a = client_for([1u8; 32], [11u8; 32], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        let gid = a.create_group_native();
+        let err = a
+            .stage_add_members_native(&gid, vec![vec![9u8; 40], vec![7u8; 12]], "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+            .expect_err("garbage key packages must not stage");
+        assert!(err.contains("no valid key packages"), "keeps the familiar headline: {err}");
+        assert!(err.contains("2 rejected"), "says HOW MANY were rejected: {err}");
+        assert!(err.contains("deserialize"), "and WHY each one failed: {err}");
+        assert!(err.contains("40"), "and its size, which distinguishes cert versions: {err}");
+    }
+
+    #[test]
+    fn an_invalid_device_cert_says_so_and_names_the_version() {
+        // The exact prod case: a v2 (Ed25519-identity) cert on a device that never came back to
+        // re-mint a v3 one. The version byte is the whole diagnosis, so it must be in the message.
+        let a = client_for([1u8; 32], [11u8; 32], "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        // A well-formed-looking cert body whose version byte is 2 — verify_device_cert rejects it.
+        let mut v2ish = vec![0u8; 2728];
+        v2ish[0] = 2;
+        let err = verify_device_cert(&v2ish);
+        assert!(err.is_none(), "a v2 cert must still be rejected — behaviour is unchanged");
+        let _ = a;
     }
 
     #[test]
