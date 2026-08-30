@@ -20,6 +20,8 @@ openmls_traits = { git = "https://github.com/openmls/openmls", rev = "9f41ddc252
 openmls_basic_credential = { git = "https://github.com/openmls/openmls", rev = "9f41ddc252cf1720a0a5e24b91d77dce988de80b", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "9f41ddc252cf1720a0a5e24b91d77dce988de80b", features = ["draft-ietf-mls-pq-ciphersuites"] }
 ml-dsa = { version = "0.1.0", features = ["zeroize"] }
+# Explicit wipes at the WASM boundary (audit 2026-08-29 F15). See serialize()/process().
+zeroize = "1"
 sha2 = "0.10"
 # force the wasm randomness backend across all getrandom majors the RustCrypto stack pulls
 gr2 = { package = "getrandom", version = "0.2", features = ["js"] }

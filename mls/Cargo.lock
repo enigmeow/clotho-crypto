@@ -171,6 +171,7 @@ dependencies = [
  "openmls_traits",
  "sha2 0.10.9",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]

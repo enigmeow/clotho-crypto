@@ -4,6 +4,8 @@
 // "Published crypto mirror".
 use std::collections::HashMap;
 
+use zeroize::Zeroize;
+
 use openmls::prelude::tls_codec::*;
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
@@ -524,7 +526,19 @@ impl MlsClient {
     /// gated, so we serialize the public `values` map directly — no extra features.)
     /// Framing: [u32 group-count]{[u32 len][group_id]}* [u32 kv-count]{[u32 klen][k][u32 vlen][v]}*
     pub fn serialize_native(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        // ⚠ EXACT CAPACITY, NOT GROWTH (audit 2026-08-29 F15/Z-2). This buffer holds the serialized
+        // SignatureKeyPair — the 32-byte device seed among it — and every group's epoch/init/HPKE/
+        // exporter secrets. Growing it with extend_from_slice reallocates repeatedly, and each
+        // abandoned allocation keeps a PARTIAL COPY of that material at some other heap address
+        // where nothing will ever wipe it. Sizing once means there is exactly one buffer to wipe,
+        // which serialize() below then does.
+        let values_guard = self.provider.storage().values.read().unwrap();
+        let cap = 4
+            + self.groups.keys().map(|id| 4 + id.len()).sum::<usize>()
+            + 4
+            + values_guard.iter().map(|(k, v)| 8 + k.len() + v.len()).sum::<usize>();
+        drop(values_guard);
+        let mut out = Vec::with_capacity(cap);
         out.extend_from_slice(&(self.groups.len() as u32).to_be_bytes());
         for id in self.groups.keys() {
             out.extend_from_slice(&(id.len() as u32).to_be_bytes());
@@ -678,11 +692,18 @@ impl MlsClient {
     pub fn process(&mut self, group_id: &[u8], message: &[u8]) -> Result<js_sys::Object, JsError> {
         // Return Err (NOT panic) on bad input so the borrow releases and the client isn't poisoned;
         // the TS receive loop catches this and skips the one bad message.
-        let r = self.process_native(group_id, message).map_err(|e| JsError::new(&e))?;
+        let mut r = self.process_native(group_id, message).map_err(|e| JsError::new(&e))?;
         let obj = js_sys::Object::new();
         js_sys::Reflect::set(&obj, &"kind".into(), &JsValue::from_str(&r.kind)).unwrap();
-        let pt = match r.plaintext {
-            Some(b) => js_sys::Uint8Array::from(&b[..]).into(),
+        // ⚠ Z-4 (audit 2026-08-29): this used to MOVE r.plaintext into the match, so the decrypted
+        // message body was dropped unwiped the moment the arm ended. Take it, hand JS its copy, then
+        // wipe ours. Same caveat as serialize(): the JS-side Uint8Array is GC-owned and beyond reach.
+        let pt = match r.plaintext.take() {
+            Some(mut b) => {
+                let v: JsValue = js_sys::Uint8Array::from(&b[..]).into();
+                b.zeroize();
+                v
+            }
             None => JsValue::NULL,
         };
         js_sys::Reflect::set(&obj, &"plaintext".into(), &pt).unwrap();
@@ -730,8 +751,18 @@ impl MlsClient {
         Ok(out)
     }
 
+    /// ⚠ WHAT THIS DOES AND DOES NOT BUY (audit 2026-08-29 F15). The returned Uint8Array is
+    /// GC-owned: once it crosses this boundary Rust can never wipe it, and
+    /// frontend/src/lib/mls/storage.ts writes it to IndexedDB in the clear. Zeroizing here removes
+    /// the RUST-side copy only. That is worth doing — it shortens the window in which a freed
+    /// buffer is recoverable from a crash dump, a devtools heap snapshot, OS swap, or a native
+    /// process dump — but it is NOT secrecy, and it does nothing against same-origin XSS, where an
+    /// attacker simply reads wasm.memory.buffer live. Do not let this line imply otherwise.
     pub fn serialize(&self) -> js_sys::Uint8Array {
-        js_sys::Uint8Array::from(&self.serialize_native()[..])
+        let mut out = self.serialize_native();
+        let arr = js_sys::Uint8Array::from(&out[..]);
+        out.zeroize();
+        arr
     }
 
     /// Static: `MlsClient.restore(device_seed, device_cert, state)` in JS. Returns `Err` (throws in
