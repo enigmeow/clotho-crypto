@@ -15,7 +15,16 @@ Production only ever calls `verify_mldsa`; `mldsa_keypair`/`_sign_for_test` exis
 """
 from __future__ import annotations
 
+import threading
+
 from dilithium_py.ml_dsa import ML_DSA_87
+
+# ⚠ EVERY CALL INTO ML_DSA_87 HOLDS THIS LOCK. dilithium-py's module-level ML_DSA_87 instance is not
+# thread-safe: verified from parallel threads, most VALID signatures come back False. FastAPI runs the
+# sync /auth/login on its threadpool, so two logins landing together rejected each other with a 401
+# (novice UX test, 2026-10-22; pinned by tests/test_pqsig.py). Concurrency control only — the
+# algorithm, keys and outputs are unchanged.
+_LOCK = threading.Lock()
 
 
 def verify_mldsa(public_key: bytes, message: bytes, signature: bytes) -> bool:
@@ -25,7 +34,8 @@ def verify_mldsa(public_key: bytes, message: bytes, signature: bytes) -> bool:
     returns False rather than crashing the endpoint (mirrors the crate's non-panicking verify twin).
     """
     try:
-        return bool(ML_DSA_87.verify(public_key, message, signature))
+        with _LOCK:
+            return bool(ML_DSA_87.verify(public_key, message, signature))
     except Exception:  # noqa: BLE001 — a bad key/sig must degrade to "invalid", never to a 500
         return False
 
@@ -33,10 +43,12 @@ def verify_mldsa(public_key: bytes, message: bytes, signature: bytes) -> bool:
 def mldsa_keypair(seed: bytes) -> tuple[bytes, bytes]:
     """Derive the (public_key, secret_key) pair from a 32-byte seed — byte-identical to the crate's
     `mldsa87_public_from_seed`. Test/fixture helper."""
-    pk, sk = ML_DSA_87.key_derive(seed)
+    with _LOCK:
+        pk, sk = ML_DSA_87.key_derive(seed)
     return pk, sk
 
 
 def _sign_for_test(secret_key: bytes, message: bytes) -> bytes:
     """Sign `message` with an ML-DSA-87 secret key (empty FIPS-204 context). Test fixtures only."""
-    return ML_DSA_87.sign(secret_key, message)
+    with _LOCK:
+        return ML_DSA_87.sign(secret_key, message)
